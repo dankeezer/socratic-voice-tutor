@@ -1,0 +1,30 @@
+# Secrets, Keys & Local Configurations
+.tutor_key
+.gemini_key
+.tutor_config
+
+# Audio files
+*.wav
+*.mp3
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# macOS system files
+.DS_Store
+
+# Debug/temporary JSON logs
+debug_request.json
+debug_response.json
+
+# Local Archives/zips
+*.zip
+*.tar.gz
+*.tgz
+
+# Course Curriculum Data (Intellectual Property / Study Materials)
+course_data.js
+socratic_voice_quiz/
+
