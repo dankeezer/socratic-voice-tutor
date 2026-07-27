@@ -10,6 +10,8 @@ import urllib.error
 import ssl
 import threading
 import time
+import re
+import html
 
 class AnimatedLoader:
     def __init__(self, message="Thinking"):
@@ -42,7 +44,6 @@ class AnimatedLoader:
 
 # Config files
 KEY_FILE = ".tutor_key"
-COURSE_DATA_FILE = "course_data.js"
 WAV_OUTPUT_FILE = "tutor_response.wav"
 TUTOR_CONFIG_FILE = ".tutor_config"
 
@@ -94,38 +95,157 @@ def save_obfuscated_key(key):
         print(f"Error saving API Key: {e}")
         return False
 
-def load_curriculum():
-    if not os.path.exists(COURSE_DATA_FILE):
-        print(f"Error: {COURSE_DATA_FILE} not found. Please run this script in the same directory as course_data.js")
-        sys.exit(1)
-    
+
+
+def scrape_url(url):
     try:
-        with open(COURSE_DATA_FILE, "r", encoding="utf-8") as f:
-            content = f.read()
-        
-        # Extract JSON Array from course_data.js (which contains "const COURSE_DATA = [ ... ];")
-        # Find first '[' and last ']'
-        start_idx = content.find('[')
-        end_idx = content.rfind(']')
-        if start_idx == -1 or end_idx == -1:
-            raise ValueError("Could not locate JSON array structure inside course_data.js")
-        
-        json_str = content[start_idx:end_idx + 1]
-        raw_list = json.loads(json_str)
-        
-        # Format list into expected dict structure: { "Path Title": { "Module Title": "Module Content" } }
-        curriculum_dict = {}
-        for path in raw_list:
-            path_title = path["title"]
-            curriculum_dict[path_title] = {}
-            for module in path["modules"]:
-                mod_title = module["title"]
-                curriculum_dict[path_title][mod_title] = module["content"]
-                
-        return curriculum_dict
+        # Add basic User-Agent to prevent 403 Forbidden on standard websites
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+        ssl_context = ssl._create_unverified_context()
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, context=ssl_context, timeout=10) as response:
+            raw_html = response.read().decode('utf-8', errors='ignore')
+            
+            # Strip style & script tags entirely
+            clean_html = re.sub(r'<(script|style|noscript)[^>]*?>.*?</\1>', '', raw_html, flags=re.DOTALL | re.IGNORECASE)
+            # Strip HTML tags
+            text = re.sub(r'<[^>]*?>', ' ', clean_html)
+            # Decode basic HTML entities
+            text = html.unescape(text)
+            # Collapse whitespace
+            text = re.sub(r'\s+', ' ', text).strip()
+            return text
     except Exception as e:
-        print(f"Error parsing curriculum database: {e}")
-        sys.exit(1)
+        print(f"\033[31mError scraping URL: {e}\033[0m")
+        return ""
+
+def scan_directory(root_path):
+    allowed_extensions = {
+        '.txt', '.md', '.py', '.js', '.json', '.ts', '.html', '.css', 
+        '.go', '.java', '.cpp', '.c', '.h', '.sh', '.yml', '.yaml', 
+        '.rst', '.csv', '.sql'
+    }
+    ignored_dirs = {
+        '.git', 'node_modules', '__pycache__', '.venv', 'venv', 'env', 
+        '.env', '.sass-cache', 'dist', 'build', 'target', '.idea', 
+        '.vscode', 'out', '.gemini', 'scratch'
+    }
+    
+    file_tree = {} # RelPath -> FullPath
+    for root, dirs, files in os.walk(root_path):
+        # Modify dirs in-place to prevent traversing ignored directories
+        dirs[:] = [d for d in dirs if d not in ignored_dirs]
+        for file in files:
+            ext = os.path.splitext(file)[1].lower()
+            if ext in allowed_extensions:
+                full_path = os.path.join(root, file)
+                rel_path = os.path.relpath(full_path, root_path)
+                file_tree[rel_path] = full_path
+    return file_tree
+
+def build_curriculum_from_folder(root_path):
+    ignored_dirs = {
+        '.git', 'node_modules', '__pycache__', '.venv', 'venv', 'env', 
+        '.env', '.sass-cache', 'dist', 'build', 'target', '.idea', 
+        '.vscode', 'out', '.gemini', 'scratch'
+    }
+    
+    # Identify first-level subdirectories to see if it is a structured curriculum
+    subdirs = sorted([d for d in os.listdir(root_path) if os.path.isdir(os.path.join(root_path, d)) and d not in ignored_dirs])
+    
+    curriculum = {}
+    
+    if subdirs:
+        # Structured Directory: Renders tracks based on first-level folders
+        for track in subdirs:
+            track_path = os.path.join(root_path, track)
+            second_level_items = sorted(os.listdir(track_path))
+            track_modules = {}
+            
+            for item in second_level_items:
+                item_path = os.path.join(track_path, item)
+                if item.startswith('.') or item in ignored_dirs:
+                    continue
+                    
+                # If it is a directory, gather all text files inside it recursively
+                if os.path.isdir(item_path):
+                    content_parts = []
+                    for r, ds, fs in os.walk(item_path):
+                        ds[:] = [d for d in ds if d not in ignored_dirs]
+                        for f in sorted(fs):
+                            if os.path.splitext(f)[1].lower() in {'.txt', '.md', '.py', '.js', '.json', '.ts', '.html', '.css', '.go', '.java', '.cpp', '.c', '.h', '.sh', '.yml', '.yaml', '.rst', '.csv', '.sql'}:
+                                try:
+                                    with open(os.path.join(r, f), 'r', encoding='utf-8', errors='ignore') as file_obj:
+                                        content_parts.append(f"\n--- FILE: {f} ---\n" + file_obj.read())
+                                except Exception:
+                                    pass
+                    if content_parts:
+                        track_modules[item] = "\n".join(content_parts)
+                        
+                # If it is a file, read it directly
+                elif os.path.isfile(item_path) and os.path.splitext(item)[1].lower() in {'.txt', '.md', '.py', '.js', '.json', '.ts', '.html', '.css', '.go', '.java', '.cpp', '.c', '.h', '.sh', '.yml', '.yaml', '.rst', '.csv', '.sql'}:
+                    try:
+                        with open(item_path, 'r', encoding='utf-8', errors='ignore') as file_obj:
+                            track_modules[os.path.splitext(item)[0]] = file_obj.read()
+                    except Exception:
+                        pass
+            if track_modules:
+                curriculum[track] = track_modules
+                
+    # If no subdirs, or if we want flat directory handling:
+    if not curriculum:
+        file_tree = scan_directory(root_path)
+        if not file_tree:
+            return {}
+            
+        print("\n\033[93mSELECT FILES TO INCLUDE IN STUDY SESSION:\033[0m")
+        keys = sorted(list(file_tree.keys()))
+        selected_flags = {k: True for k in keys} # Default to all selected
+        
+        while True:
+            print("\nActive Checklist of Study Materials:")
+            for idx, key in enumerate(keys, 1):
+                status = "[x]" if selected_flags[key] else "[ ]"
+                print(f"[{idx}] {status} {key}")
+            print("\nCommands: 'all' to select all, 'none' to unselect all, <number> to toggle, 'done' to begin session.")
+            cmd = input("Command: ").strip().lower()
+            if cmd == 'done':
+                break
+            elif cmd == 'all':
+                selected_flags = {k: True for k in keys}
+            elif cmd == 'none':
+                selected_flags = {k: False for k in keys}
+            else:
+                try:
+                    idx = int(cmd) - 1
+                    if 0 <= idx < len(keys):
+                        target_key = keys[idx]
+                        selected_flags[target_key] = not selected_flags[target_key]
+                    else:
+                        print("Invalid file number.")
+                except Exception:
+                    print("Invalid command.")
+        
+        # Aggregate contents of selected files
+        content_parts = []
+        selected_names = []
+        for key in keys:
+            if selected_flags[key]:
+                selected_names.append(key)
+                try:
+                    with open(file_tree[key], 'r', encoding='utf-8', errors='ignore') as file_obj:
+                        content_parts.append(f"\n--- FILE: {key} ---\n" + file_obj.read())
+                except Exception:
+                    pass
+        if content_parts:
+            curriculum["Custom Directory"] = {
+                "Selected Files": "\n".join(content_parts),
+                "_selected_paths_list": selected_names
+            }
+            
+    return curriculum
 
 def play_pcm_audio(audio_base64, sample_rate=24000, play_rate=1.1):
     try:
@@ -614,35 +734,205 @@ def main():
     print(f"Selected Gemini Neural Voice: \033[95m{voice_name}\033[0m")
     
     # 3. Load and Select Module
-    curriculum = load_curriculum()
+    # 3. Load and Select Module
+    last_type = tutor_config.get("last_type")
+    last_path = tutor_config.get("last_path")
+    last_name = tutor_config.get("last_name")
     
-    print("\n\033[93mSELECT YOUR LEARNING PATH:\033[0m")
-    paths = list(curriculum.keys())
-    for idx, path in enumerate(paths, 1):
-        print(f"[{idx}] {path}")
+    curriculum = None
+    selected_path = None
+    selected_module = None
+    
+    # Check if memory exists and is valid
+    can_resume = False
+    if last_type and last_path:
+        if last_type == "url":
+            can_resume = True
+        elif os.path.exists(last_path):
+            can_resume = True
+            
+    if can_resume:
+        print("\n\033[93mRESUME STUDY SESSION:\033[0m")
+        print(f"[1] 🔄 Continue learning with: {last_name}")
+        print("[2] 🚀 Start a new study session")
+        choice = input("\nEnter Choice (1-2): ").strip()
+        if choice == "1":
+            print(f"\n\033[94m🔄 Restoring session content from {last_type} source...\033[0m")
+            if last_type == "file":
+                try:
+                    with open(last_path, 'r', encoding='utf-8', errors='ignore') as f:
+                        file_text = f.read()
+                    curriculum = { "Single Files": { last_name: file_text } }
+                    selected_path = "Single Files"
+                    selected_module = last_name
+                except Exception as e:
+                    print(f"Error restoring file: {e}")
+            elif last_type == "url":
+                print(f"⚙ Re-scraping URL: {last_path}...")
+                scraped_text = scrape_url(last_path)
+                if scraped_text:
+                    curriculum = { "Web Resources": { last_name: scraped_text } }
+                    selected_path = "Web Resources"
+                    selected_module = last_name
+                else:
+                    print("Error: Could not re-scrape URL.")
+            elif last_type in ["directory", "directory_structured", "directory_flat"]:
+                # Try to load pre-selected files directly from the config first for instantaneous seamless restore
+                selected_files = tutor_config.get("selected_files", [])
+                if selected_files:
+                    content_parts = []
+                    loaded_names = []
+                    for f_path in selected_files:
+                        options_to_try = [f_path, os.path.join(last_path, f_path)]
+                        for opt in options_to_try:
+                            if os.path.exists(opt) and os.path.isfile(opt):
+                                try:
+                                    with open(opt, 'r', encoding='utf-8', errors='ignore') as file_obj:
+                                        rel_display = os.path.relpath(opt, last_path) if last_path else os.path.basename(opt)
+                                        content_parts.append(f"\n--- FILE: {rel_display} ---\n" + file_obj.read())
+                                        loaded_names.append(rel_display)
+                                    break
+                                except Exception:
+                                    pass
+                    if content_parts:
+                        curriculum = { "Custom Directory": { "Selected Files": "\n".join(content_parts) } }
+                        selected_path = "Custom Directory"
+                        selected_module = "Selected Files"
+                        print(f"\033[92m✔ Restored previous session files: {', '.join(loaded_names[:3])}{'...' if len(loaded_names) > 3 else ''}\033[0m")
+                
+                # If we couldn't load via selected_files, rebuild the structured/flat directory curriculum
+                if not curriculum:
+                    curriculum = build_curriculum_from_folder(last_path)
+                    selected_path = tutor_config.get("last_track")
+                    selected_module = tutor_config.get("last_module")
+                    
+    if not curriculum:
+        print("\n\033[93mSELECT YOUR STUDY SOURCE:\033[0m")
+        options = [
+            ("Load a custom directory (flat or recursive mapping)", "directory"),
+            ("Load a custom single file", "file"),
+            ("Ingest a web URL", "url")
+        ]
         
-    try:
-        path_choice = int(input("\nEnter Path Number: ").strip()) - 1
-        if path_choice < 0 or path_choice >= len(paths):
-            raise ValueError
-        selected_path = paths[path_choice]
-    except Exception:
-        print("Invalid selection. Connecting to Path 1.")
-        selected_path = paths[0]
+        for idx, (label, _) in enumerate(options, 1):
+            print(f"[{idx}] {label}")
+            
+        try:
+            source_choice = int(input("\nEnter Choice Number: ").strip()) - 1
+            if source_choice < 0 or source_choice >= len(options):
+                raise ValueError
+            selected_source_type = options[source_choice][1]
+        except Exception:
+            selected_source_type = "directory"
+            
+        if selected_source_type == "file":
+            file_path = input("\nEnter full path to single file: ").strip()
+            file_path = os.path.expanduser(file_path)
+            if not os.path.exists(file_path) or not os.path.isfile(file_path):
+                print("\033[31mFile not found.\033[0m")
+                sys.exit(1)
+            else:
+                filename = os.path.basename(file_path)
+                try:
+                    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                        file_text = f.read()
+                    curriculum = { "Single Files": { filename: file_text } }
+                    selected_path = "Single Files"
+                    selected_module = filename
+                    
+                    tutor_config["last_type"] = "file"
+                    tutor_config["last_path"] = os.path.abspath(file_path)
+                    tutor_config["last_name"] = filename
+                    tutor_config["selected_files"] = []
+                    save_tutor_config(tutor_config)
+                except Exception as e:
+                    print(f"Error reading file: {e}")
+                    sys.exit(1)
+                    
+        elif selected_source_type == "url":
+            url = input("\nEnter web URL: ").strip()
+            print(f"⚙ Fetching and cleaning web page content...")
+            scraped_text = scrape_url(url)
+            if not scraped_text:
+                print("\033[31mFailed to scrape URL.\033[0m")
+                sys.exit(1)
+            else:
+                curriculum = { "Web Resources": { url: scraped_text } }
+                selected_path = "Web Resources"
+                selected_module = url
+                
+                tutor_config["last_type"] = "url"
+                tutor_config["last_path"] = url
+                tutor_config["last_name"] = url
+                tutor_config["selected_files"] = []
+                save_tutor_config(tutor_config)
+                
+        elif selected_source_type == "directory":
+            dir_path = input("\nEnter full directory path (or '.' for current folder): ").strip()
+            dir_path = os.path.expanduser(dir_path)
+            if not os.path.exists(dir_path) or not os.path.isdir(dir_path):
+                print("\033[31mDirectory not found.\033[0m")
+                sys.exit(1)
+            else:
+                curriculum = build_curriculum_from_folder(dir_path)
+                if not curriculum:
+                    print("\033[31mNo supported text files found in folder. Exiting...\033[0m")
+                    sys.exit(1)
+                
+                is_flat = "Custom Directory" in curriculum
+                tutor_config["last_type"] = "directory_flat" if is_flat else "directory_structured"
+                tutor_config["last_path"] = os.path.abspath(dir_path)
+                tutor_config["last_name"] = os.path.basename(os.path.abspath(dir_path))
+                if is_flat:
+                    selected_path = "Custom Directory"
+                    selected_module = "Selected Files"
+                    tutor_config["selected_files"] = curriculum["Custom Directory"].get("_selected_paths_list", [])
+                save_tutor_config(tutor_config)
+                
+    # 3. Path & Module selection menu (runs if selected_path and selected_module are not yet established)
+    if not selected_path or not selected_module:
+        print("\n\033[93mSELECT YOUR LEARNING PATH:\033[0m")
+        paths = list(curriculum.keys())
+        for idx, path in enumerate(paths, 1):
+            print(f"[{idx}] {path}")
+            
+        try:
+            path_choice = int(input("\nEnter Path Number: ").strip()) - 1
+            if path_choice < 0 or path_choice >= len(paths):
+                raise ValueError
+            selected_path = paths[path_choice]
+        except Exception:
+            print("Invalid selection. Connecting to Path 1.")
+            selected_path = paths[0]
+            
+        print(f"\n\033[93mSELECT A MODULE UNDER: {selected_path}\033[0m")
+        modules = list(curriculum[selected_path].keys())
+        for idx, module in enumerate(modules, 1):
+            print(f"[{idx}] {module}")
+            
+        try:
+            module_choice = int(input("\nEnter Module Number: ").strip()) - 1
+            if module_choice < 0 or module_choice >= len(modules):
+                raise ValueError
+            selected_module = modules[module_choice]
+        except Exception:
+            print("Invalid selection. Connecting to Module 1.")
+            selected_module = modules[0]
+            
+    if tutor_config.get("last_type") in ["directory_structured"]:
+        tutor_config["last_track"] = selected_path
+        tutor_config["last_module"] = selected_module
         
-    print(f"\n\033[93mSELECT A MODULE UNDER: {selected_path}\033[0m")
-    modules = list(curriculum[selected_path].keys())
-    for idx, module in enumerate(modules, 1):
-        print(f"[{idx}] {module}")
-        
-    try:
-        module_choice = int(input("\nEnter Module Number: ").strip()) - 1
-        if module_choice < 0 or module_choice >= len(modules):
-            raise ValueError
-        selected_module = modules[module_choice]
-    except Exception:
-        print("Invalid selection. Connecting to Module 1.")
-        selected_module = modules[0]
+        # Save specific module files inside selected_files to guarantee absolute resume state
+        track_path = os.path.join(tutor_config["last_path"], selected_path)
+        module_path = os.path.join(track_path, selected_module)
+        if os.path.exists(module_path):
+            if os.path.isdir(module_path):
+                file_tree = scan_directory(module_path)
+                tutor_config["selected_files"] = [os.path.join(module_path, f) for f in file_tree.keys()]
+            else:
+                tutor_config["selected_files"] = [module_path]
+        save_tutor_config(tutor_config)
         
     selected_content = curriculum[selected_path][selected_module]
     print(f"\n\033[92m✔ Loaded Module: {selected_module} ({len(selected_content)} bytes of study material)\033[0m")
