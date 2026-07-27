@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
 import os
 import sys
+
+# On macOS, Python installers often do not load standard system root certificates,
+# leading to SSL: CERTIFICATE_VERIFY_FAILED error. We securely resolve this by
+# loading the standard macOS root cert bundle if it exists.
+if sys.platform == "darwin" and os.path.exists("/etc/ssl/cert.pem") and not os.environ.get("SSL_CERT_FILE"):
+    os.environ["SSL_CERT_FILE"] = "/etc/ssl/cert.pem"
 import json
 import base64
 import wave
@@ -103,7 +109,7 @@ def scrape_url(url):
         headers = {
             "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         }
-        ssl_context = ssl._create_unverified_context()
+        ssl_context = ssl.create_default_context()
         req = urllib.request.Request(url, headers=headers)
         with urllib.request.urlopen(req, context=ssl_context, timeout=10) as response:
             raw_html = response.read().decode('utf-8', errors='ignore')
@@ -341,7 +347,7 @@ def query_gemini(api_key, model, system_instruction, prompt_text, chat_history, 
     for attempt in range(1, max_retries + 1):
         try:
             import ssl
-            ssl_context = ssl._create_unverified_context()
+            ssl_context = ssl.create_default_context()
             req = urllib.request.Request(
                 url, 
                 data=json.dumps(payload).encode('utf-8'), 
@@ -419,7 +425,7 @@ def query_gemini(api_key, model, system_instruction, prompt_text, chat_history, 
         for attempt in range(1, max_retries + 1):
             try:
                 import ssl
-                ssl_context = ssl._create_unverified_context()
+                ssl_context = ssl.create_default_context()
                 req = urllib.request.Request(
                     tts_url, 
                     data=json.dumps(tts_payload).encode('utf-8'), 
@@ -447,7 +453,7 @@ def query_gemini(api_key, model, system_instruction, prompt_text, chat_history, 
     return ai_text, audio_base64
 def get_available_models(api_key):
     import ssl
-    ssl_context = ssl._create_unverified_context()
+    ssl_context = ssl.create_default_context()
     url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
     try:
         req = urllib.request.Request(url, method='GET')
@@ -558,7 +564,7 @@ def transcribe_audio_gemini(api_key, model, audio_path):
     
     try:
         import ssl
-        ssl_context = ssl._create_unverified_context()
+        ssl_context = ssl.create_default_context()
         req = urllib.request.Request(
             url, 
             data=json.dumps(payload).encode('utf-8'), 
@@ -609,7 +615,7 @@ def summarize_content(api_key, raw_content):
         }
         
         headers = {"Content-Type": "application/json"}
-        ssl_context = ssl._create_unverified_context()
+        ssl_context = ssl.create_default_context()
         req = urllib.request.Request(
             url, 
             data=json.dumps(payload).encode('utf-8'), 
