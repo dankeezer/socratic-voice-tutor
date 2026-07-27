@@ -8,6 +8,37 @@ import subprocess
 import urllib.request
 import urllib.error
 import ssl
+import threading
+import time
+
+class AnimatedLoader:
+    def __init__(self, message="Thinking"):
+        self.message = message
+        self.is_running = False
+        self._thread = None
+
+    def _animate(self):
+        frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+        idx = 0
+        while self.is_running:
+            sys.stdout.write(f"\r\033[90m{frames[idx]} {self.message}...\033[0m")
+            sys.stdout.flush()
+            idx = (idx + 1) % len(frames)
+            time.sleep(0.08)
+
+    def start(self):
+        if not self.is_running:
+            self.is_running = True
+            self._thread = threading.Thread(target=self._animate, daemon=True)
+            self._thread.start()
+
+    def stop(self):
+        if self.is_running:
+            self.is_running = False
+            if self._thread:
+                self._thread.join(timeout=1.0)
+            sys.stdout.write("\r\033[K")
+            sys.stdout.flush()
 
 # Config files
 KEY_FILE = ".tutor_key"
@@ -198,6 +229,10 @@ def query_gemini(api_key, model, system_instruction, prompt_text, chat_history, 
             
     if not ai_text:
         ai_text = "I didn't catch that concept clearly. Could you expand on it?"
+        
+    # Clear the "Thinking..." line and flush
+    print("\r\033[K", end="")
+    sys.stdout.flush()
         
     audio_base64 = None
     
@@ -591,7 +626,7 @@ The reference material is the high-density course module summary provided below.
 Your Core Guidelines:
 1. Speak in a friendly, conversational, professional tone.
 2. Ask exactly ONE question at a time.
-3. Be CONCISE (no more than 2-3 sentences per turn) because your responses will be spoken aloud.
+3. Be EXTREMELY CONCISE: Write exactly ONE or TWO short, punchy sentences (maximum 20-25 words total) per turn. Keep your questions and hints brief, direct, and conversational because your responses are synthesized to speech. This minimizes synthesis latency.
 4. OPTIMIZE FOR VOICE: Do NOT use markdown symbols, asterisks, hash signs, math symbols, bullet points, or list formatting. Write clear, natural, speakable English.
 5. Socratic Method: Validate correct lines of reasoning, but adapt the difficulty up. If they are incorrect or unsure, break the concept down, offer a gentle hint or ask a simpler sub-question, and never reveal the answers directly.
 6. Summary: When they successfully demonstrate understanding of the main concepts in this module, or they wish to wrap up, end the session with a warm 2-sentence summary of what they mastered, and do not assign a score.
@@ -615,10 +650,10 @@ Reference Material for this Entire Module:
     
     while True:
         try:
-            # Query Gemini (pass audio input path if the turn is a voice response)
-            if user_input != "[START_QUIZ]":
-                print("\033[90mThinking...\033[0m", end="\r")
-                
+            # Start the animated loader to reassure the user
+            loader = AnimatedLoader("Thinking")
+            loader.start()
+                 
             ai_text, audio_base64 = query_gemini(
                 api_key, 
                 selected_model, 
@@ -628,6 +663,9 @@ Reference Material for this Entire Module:
                 voice_name,
                 audio_path
             )
+            
+            # Stop the loader cleanly
+            loader.stop()
             
             # Print response
             print(f"\n\033[92mTutor:\033[0m {ai_text}\n")
