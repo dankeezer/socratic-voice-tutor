@@ -7,6 +7,12 @@ import sys
 # loading the standard macOS root cert bundle if it exists.
 if sys.platform == "darwin" and os.path.exists("/etc/ssl/cert.pem") and not os.environ.get("SSL_CERT_FILE"):
     os.environ["SSL_CERT_FILE"] = "/etc/ssl/cert.pem"
+
+# On macOS, Python installers often do not load standard system root certificates,
+# leading to SSL: CERTIFICATE_VERIFY_FAILED error. We securely resolve this by
+# loading the standard macOS root cert bundle if it exists.
+if sys.platform == "darwin" and os.path.exists("/etc/ssl/cert.pem") and not os.environ.get("SSL_CERT_FILE"):
+    os.environ["SSL_CERT_FILE"] = "/etc/ssl/cert.pem"
 import json
 import base64
 import wave
@@ -80,6 +86,25 @@ def save_tutor_config(config):
             json.dump(existing, f, indent=2)
     except Exception:
         pass
+
+TUTOR_PROGRESS_FILE = ".tutor_progress"
+
+def load_tutor_progress():
+    if os.path.exists(TUTOR_PROGRESS_FILE):
+        try:
+            with open(TUTOR_PROGRESS_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+def save_tutor_progress(progress):
+    try:
+        with open(TUTOR_PROGRESS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(progress, f, indent=4)
+        return True
+    except Exception:
+        return False
 
 def get_obfuscated_key():
     if os.path.exists(KEY_FILE):
@@ -266,7 +291,11 @@ def play_pcm_audio(audio_base64, sample_rate=24000, play_rate=1.1):
             
         # Play natively on macOS via afplay (built-in command-line audio player)
         # Play at the configured playback rate with high-quality pitch preservation (-q 1)
-        subprocess.run(["afplay", "-r", str(play_rate), "-q", "1", WAV_OUTPUT_FILE])
+        # We enforce a 15-second timeout because afplay's pitch-preservation (-q 1) can occasionally hang on truncated streams.
+        try:
+            subprocess.run(["afplay", "-r", str(play_rate), "-q", "1", WAV_OUTPUT_FILE], timeout=15)
+        except subprocess.TimeoutExpired:
+            pass
         
         # Clean up temporary audio file
         if os.path.exists(WAV_OUTPUT_FILE):
@@ -331,7 +360,8 @@ def query_gemini(api_key, model, system_instruction, prompt_text, chat_history, 
         },
         "generationConfig": {
             "temperature": 0.7,
-            "maxOutputTokens": 1024
+            "maxOutputTokens": 1024,
+            "responseMimeType": "application/json"
         }
     }
     
@@ -354,7 +384,7 @@ def query_gemini(api_key, model, system_instruction, prompt_text, chat_history, 
                 headers=headers, 
                 method='POST'
             )
-            with urllib.request.urlopen(req, context=ssl_context) as response:
+            with urllib.request.urlopen(req, context=ssl_context, timeout=15) as response:
                 res_data = json.loads(response.read().decode('utf-8'))
                 parts = res_data['candidates'][0]['content']['parts']
                 ai_text_list = [part['text'] for part in parts if 'text' in part]
@@ -383,6 +413,17 @@ def query_gemini(api_key, model, system_instruction, prompt_text, chat_history, 
                 continue
             raise Exception(str(e))
             
+    # Try to parse Stage 1 output as JSON.
+    evaluation_dict = None
+    if ai_text:
+        try:
+            parsed_data = json.loads(ai_text)
+            if isinstance(parsed_data, dict) and "tutor_speech" in parsed_data:
+                ai_text = parsed_data["tutor_speech"]
+                evaluation_dict = parsed_data
+        except Exception:
+            pass
+
     if not ai_text:
         ai_text = "I didn't catch that concept clearly. Could you expand on it?"
         
@@ -432,7 +473,7 @@ def query_gemini(api_key, model, system_instruction, prompt_text, chat_history, 
                     headers=headers, 
                     method='POST'
                 )
-                with urllib.request.urlopen(req, context=ssl_context) as response:
+                with urllib.request.urlopen(req, context=ssl_context, timeout=15) as response:
                     res_data = json.loads(response.read().decode('utf-8'))
                     parts = res_data['candidates'][0]['content']['parts']
                     audio_bytes_list = []
@@ -450,14 +491,14 @@ def query_gemini(api_key, model, system_instruction, prompt_text, chat_history, 
                 else:
                     time.sleep(1.0)
                     
-    return ai_text, audio_base64
+    return ai_text, audio_base64, evaluation_dict
 def get_available_models(api_key):
     import ssl
     ssl_context = ssl.create_default_context()
     url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
     try:
         req = urllib.request.Request(url, method='GET')
-        with urllib.request.urlopen(req, context=ssl_context) as response:
+        with urllib.request.urlopen(req, context=ssl_context, timeout=10) as response:
             res_data = json.loads(response.read().decode('utf-8'))
             model_names = [m['name'].split('/')[-1] for m in res_data.get('models', [])]
             return model_names
@@ -571,7 +612,7 @@ def transcribe_audio_gemini(api_key, model, audio_path):
             headers=headers, 
             method='POST'
         )
-        with urllib.request.urlopen(req, context=ssl_context) as response:
+        with urllib.request.urlopen(req, context=ssl_context, timeout=15) as response:
             res_data = json.loads(response.read().decode('utf-8'))
             parts = res_data['candidates'][0]['content']['parts']
             text_parts = [part['text'] for part in parts if 'text' in part]
@@ -623,7 +664,7 @@ def summarize_content(api_key, raw_content):
             method='POST'
         )
         try:
-            with urllib.request.urlopen(req, context=ssl_context) as response:
+            with urllib.request.urlopen(req, context=ssl_context, timeout=15) as response:
                 res_data = json.loads(response.read().decode('utf-8'))
                 parts = res_data['candidates'][0]['content']['parts']
                 text_parts = [part['text'] for part in parts if 'text' in part]
@@ -635,6 +676,106 @@ def summarize_content(api_key, raw_content):
             
     # Fallback to returning truncated raw content if summarization fails
     return raw_content[:4000], "local fallback raw truncation"
+
+def extract_concepts(api_key, dense_summary):
+    fallback_concepts = [
+        {"id": 1, "concept": "Core Definitions and Fundamentals", "status": "Unvisited", "score": 0.0},
+        {"id": 2, "concept": "Technical Specifications and Architectures", "status": "Unvisited", "score": 0.0},
+        {"id": 3, "concept": "Practical Implementation and Diagnostics", "status": "Unvisited", "score": 0.0}
+    ]
+    
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent?key={api_key}"
+    payload = {
+        "contents": [
+            {
+                "role": "user",
+                "parts": [
+                    {
+                        "text": (
+                            "Extract exactly 3 to 5 core learning concepts/milestones from the following course study material. "
+                            "Return them as a JSON list of strings (each string representing a short, high-level, clear concept of 3-7 words). "
+                            "Do not include markdown blocks or any wrapping other than a standard JSON list of strings.\n\n"
+                            "Study Material:\n" + dense_summary
+                        )
+                    }
+                ]
+            }
+        ],
+        "generationConfig": {
+            "temperature": 0.1,
+            "maxOutputTokens": 512,
+            "responseMimeType": "application/json"
+        }
+    }
+    
+    headers = {"Content-Type": "application/json"}
+    ssl_context = ssl.create_default_context()
+    req = urllib.request.Request(
+        url, 
+        data=json.dumps(payload).encode('utf-8'), 
+        headers=headers, 
+        method='POST'
+    )
+    try:
+        with urllib.request.urlopen(req, context=ssl_context, timeout=15) as response:
+            res_data = json.loads(response.read().decode('utf-8'))
+            parts = res_data['candidates'][0]['content']['parts']
+            text_parts = [part['text'] for part in parts if 'text' in part]
+            raw_json = "".join(text_parts).strip()
+            concept_strings = json.loads(raw_json)
+            if isinstance(concept_strings, list) and len(concept_strings) >= 2:
+                concepts = []
+                for idx, c_str in enumerate(concept_strings[:5], 1):
+                    concepts.append({
+                        "id": idx,
+                        "concept": c_str,
+                        "status": "Unvisited",
+                        "score": 0.0
+                    })
+                return concepts
+    except Exception:
+        pass
+    return fallback_concepts
+
+def draw_progress_dashboard(concepts):
+    print("\n\033[94m━━ SOCRATIC ABSORPTION PROGRESS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m")
+    total_score = 0.0
+    for c in concepts:
+        status = c["status"]
+        score = c["score"]
+        total_score += score
+        
+        if status == "Mastered":
+            icon = "\033[92m✔\033[0m"
+        elif status == "Testing":
+            icon = "\033[93m◑\033[0m"
+        else:
+            icon = "\033[90m○\033[0m"
+            
+        bar_len = int(score * 10)
+        bar = "█" * bar_len + "░" * (10 - bar_len)
+        if status == "Mastered":
+            bar_color = "\033[92m" + bar + "\033[0m"
+        elif status == "Testing":
+            bar_color = "\033[93m" + bar + "\033[0m"
+        else:
+            bar_color = "\033[90m" + bar + "\033[0m"
+            
+        concept_name = c["concept"]
+        if len(concept_name) > 35:
+            concept_name = concept_name[:32] + "..."
+        else:
+            concept_name = concept_name.ljust(35, ".")
+            
+        print(f"  {icon}  {concept_name} [{bar_color}] {int(score * 100):>3}% ({status:<9})")
+        
+    print("\033[94m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m")
+    overall_percent = int((total_score / len(concepts)) * 100) if concepts else 0
+    overall_bar_len = int((total_score / len(concepts)) * 20) if concepts else 0
+    overall_bar = "▓" * overall_bar_len + "░" * (20 - overall_bar_len)
+    overall_bar_color = "\033[92m" + overall_bar + "\033[0m"
+    print(f"  Mastery Progress: [{overall_bar_color}] {overall_percent:>3}% Absorbed")
+    print("\033[94m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m\n")
 
 def check_system_dependencies():
     import sys
@@ -952,20 +1093,60 @@ def main():
         percentage_reduction = 85
     print(f"\033[92m✔ Study material summarized into high-density reference context via {summarizer_model} (reduced by {percentage_reduction}%)\033[0m")
     
-    # 4. Construct Socratic System Instruction
+    # 4. Extract or Resume Core Concepts for SAPE
+    progress_db = load_tutor_progress()
+    module_key = f"{selected_path}::{selected_module}"
+    concepts = None
+    
+    if module_key in progress_db:
+        existing = progress_db[module_key]
+        print(f"\n\033[93m◑ Existing progress found for: {selected_module}\033[0m")
+        draw_progress_dashboard(existing)
+        resume = input("Would you like to resume your previous session? [Y/n]: ").strip().lower()
+        if resume != 'n':
+            concepts = existing
+            print("\033[92m✔ Resumed previous session progress.\033[0m")
+            
+    if not concepts:
+        print(f"\033[94m⚙ Extracting Core Concepts for Socratic Absorption Progress Engine (SAPE)...\033[0m")
+        concepts = extract_concepts(api_key, dense_summary)
+        if concepts:
+            concepts[0]["status"] = "Testing"
+        # Save initial progress
+        progress_db[module_key] = concepts
+        save_tutor_progress(progress_db)
+        
+    # Construct Socratic System Instruction with SAPE Metadata including status and scores
+    curriculum_str = "\n".join([f"- ID {c['id']}: {c['concept']} (Status: {c['status']}, Progress: {int(c['score']*100)}% Mastered)" for c in concepts])
+    
     system_instruction = f"""You are a world-class Socratic Tutor conducting a 1-on-1 verbal quiz session with an advanced systems engineer.
 The reference material is the high-density course module summary provided below.
 
 Your Core Guidelines:
 1. Speak in a friendly, conversational, professional tone.
-2. Ask exactly ONE question at a time.
-3. Be EXTREMELY CONCISE: Write exactly ONE or TWO short, punchy sentences (maximum 20-25 words total) per turn. Keep your questions and hints brief, direct, and conversational because your responses are synthesized to speech. This minimizes synthesis latency.
+2. Ask exactly ONE question at a time, targeted at checking understanding of the ACTIVE concept.
+3. Be EXTREMELY CONCISE: Write exactly ONE or TWO short, punchy sentences (maximum 20-25 words total) for your tutor speech. Keep your questions and hints brief, direct, and conversational because your response is synthesized to speech. This minimizes synthesis latency.
 4. OPTIMIZE FOR VOICE: Do NOT use markdown symbols, asterisks, hash signs, math symbols, bullet points, or list formatting. Write clear, natural, speakable English.
-5. Socratic Method: Validate correct lines of reasoning, but adapt the difficulty up. If they are incorrect or unsure, break the concept down, offer a gentle hint or ask a simpler sub-question, and never reveal the answers directly.
-6. Summary: When they successfully demonstrate understanding of the main concepts in this module, or they wish to wrap up, end the session with a warm 2-sentence summary of what they mastered, and do not assign a score.
+5. Socratic Method: Validate correct lines of reasoning, but adapt the difficulty up. If they are incorrect or unsure, break the concept down, offer a gentle hint or ask a simpler sub-question, and NEVER reveal the correct answers directly under any circumstances.
+6. Summary: When the user successfully demonstrates understanding of all concepts, congratulate them warmly with a 2-sentence wrap-up summary of what they mastered.
+7. Phrasing Variety: Avoid repetitive validation phrases (like "Spot on!" or "Exactly!") and Socratic openers (like "Think about..." or "Can you think about...") in your responses. Vary your validation greetings naturally (e.g., "Excellent point!", "That is correct!", "Perfect!", "Right on track!", "You got it!") and vary your Socratic entry points (e.g., "Consider...", "How would you describe...", "What happens when...", "Let's look at...", "Where does...", "How do we handle...").
+
+Curriculum Map for this Module:
+{curriculum_str}
 
 Reference Material for this Entire Module:
-{dense_summary}"""
+{dense_summary}
+
+JSON RESPONSE FORMAT REQUIREMENT:
+You must return your response in raw JSON format matching this exact schema:
+{{
+  "tutor_speech": "Your spoken Socratic response to the user. MUST follow the conciseness and voice guidelines.",
+  "assessed_concept_id": <int representing the concept ID being assessed by the user's latest response>,
+  "comprehension_score_change": <float increment representing how much of this concept they have absorbed in this turn. Use positive values for correct progress, e.g., 0.3 or 0.5. Set 0.0 or negative if they are confused or wrong, up to a maximum concept score of 1.0>,
+  "concept_mastered": <boolean indicating if the student has fully mastered and absorbed this concept (score >= 1.0)>,
+  "next_concept_id_to_test": <int representing the next concept ID you will direct the conversation toward>
+}}
+"""
 
     # 5. Dialog Session Loop
     print("\n\033[94m" + "="*60 + "\033[0m")
@@ -974,24 +1155,37 @@ Reference Material for this Entire Module:
     print("   Type 'exit' or 'quit' at any time to conclude your quiz.")
     print("\033[94m" + "="*60 + "\033[0m\n")
     
+    # Determine the first unmastered concept to start testing from
+    start_concept_id = 1
+    for c in concepts:
+        if c["status"] != "Mastered":
+            start_concept_id = c["id"]
+            break
+            
     chat_history = []
     user_input = "[START_QUIZ]"
     audio_path = None
     
     # Flag to monitor if we had to failover to local TTS due to API key restrictions
     use_neural_audio = True
+    should_draw_dashboard = True
     
     while True:
         try:
+            # Draw Progress Dashboard if requested (e.g. start of session or when a topic is mastered)
+            if should_draw_dashboard:
+                draw_progress_dashboard(concepts)
+                should_draw_dashboard = False
+            
             # Start the animated loader to reassure the user
             loader = AnimatedLoader("Thinking")
             loader.start()
                  
-            ai_text, audio_base64 = query_gemini(
+            ai_text, audio_base64, evaluation = query_gemini(
                 api_key, 
                 selected_model, 
                 system_instruction, 
-                user_input if user_input != "[START_QUIZ]" else "Begin the Socratic quiz, introduce yourself warmly, and ask the first foundational question.",
+                user_input if user_input != "[START_QUIZ]" else f"Begin the Socratic quiz, introduce yourself warmly, and ask the first foundational question for Concept ID {start_concept_id}.",
                 chat_history,
                 voice_name,
                 audio_path
@@ -999,6 +1193,58 @@ Reference Material for this Entire Module:
             
             # Stop the loader cleanly
             loader.stop()
+            
+            # Process SAPE evaluation
+            if evaluation:
+                try:
+                    assessed_id = evaluation.get("assessed_concept_id")
+                    score_change = evaluation.get("comprehension_score_change", 0.0)
+                    mastered = evaluation.get("concept_mastered", False)
+                    
+                    for c in concepts:
+                        if c["id"] == assessed_id:
+                            old_status = c["status"]
+                            c["score"] = max(0.0, min(1.0, c["score"] + score_change))
+                            if mastered or c["score"] >= 1.0:
+                                c["score"] = 1.0
+                                c["status"] = "Mastered"
+                            elif c["score"] > 0.0:
+                                c["status"] = "Testing"
+                                
+                            # Display updated dashboard if a concept transitions to Mastered
+                            if c["status"] == "Mastered" and old_status != "Mastered":
+                                should_draw_dashboard = True
+                            break
+                            
+                    # Update status of other concepts
+                    next_active_found = False
+                    for c in concepts:
+                        if c["status"] != "Mastered":
+                            if not next_active_found:
+                                c["status"] = "Testing"
+                                next_active_found = True
+                            else:
+                                c["status"] = "Unvisited"
+                                
+                    # Persist turn-by-turn progress updates
+                    progress_db = load_tutor_progress()
+                    progress_db[module_key] = concepts
+                    save_tutor_progress(progress_db)
+                    
+                    # Check for completion
+                    if all(c["status"] == "Mastered" for c in concepts):
+                        draw_progress_dashboard(concepts)
+                        print(f"\n\033[92mTutor:\033[0m {ai_text}\n")
+                        if use_neural_audio and audio_base64:
+                            play_pcm_audio(audio_base64, play_rate=voice_speed)
+                        else:
+                            print("\033[30;43m[Voice Output: macOS Premium System Fallback]\033[0m")
+                            subprocess.run(["say", ai_text])
+                        print("\n\033[92m🎉 CONGRATULATIONS! You have successfully mastered all concepts in this module!\033[0m")
+                        print("\033[93mSocratic Session Concluded. Warm study greetings!\033[0m\n")
+                        break
+                except Exception:
+                    pass
             
             # Print response
             print(f"\n\033[92mTutor:\033[0m {ai_text}\n")

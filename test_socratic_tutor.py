@@ -18,14 +18,17 @@ class TestSocraticTutor(unittest.TestCase):
         # Patch the file constants in socratic_tutor to point to our temp dir
         self.orig_key_file = socratic_tutor.KEY_FILE
         self.orig_config_file = socratic_tutor.TUTOR_CONFIG_FILE
+        self.orig_progress_file = socratic_tutor.TUTOR_PROGRESS_FILE
         
         socratic_tutor.KEY_FILE = os.path.join(self.test_dir, ".tutor_key")
         socratic_tutor.TUTOR_CONFIG_FILE = os.path.join(self.test_dir, ".tutor_config")
+        socratic_tutor.TUTOR_PROGRESS_FILE = os.path.join(self.test_dir, ".tutor_progress")
 
     def tearDown(self):
         # Restore the original constants
         socratic_tutor.KEY_FILE = self.orig_key_file
         socratic_tutor.TUTOR_CONFIG_FILE = self.orig_config_file
+        socratic_tutor.TUTOR_PROGRESS_FILE = self.orig_progress_file
         # Clean up temporary directory
         shutil.rmtree(self.test_dir)
 
@@ -108,6 +111,98 @@ class TestSocraticTutor(unittest.TestCase):
         # Main text should be present and whitespace normalized
         self.assertIn("Hello World", scraped_text)
         self.assertIn("Socratic tutor test.", scraped_text)
+
+    @patch('urllib.request.urlopen')
+    def test_extract_concepts(self, mock_urlopen):
+        # 1. Success case
+        mock_response = MagicMock()
+        mock_response.read.return_value = b'{"candidates": [{"content": {"parts": [{"text": "[\\"SYN Connection\\", \\"SYN-ACK Verification\\", \\"ACK Establishment\\"]"}]}}]}'
+        mock_urlopen.return_value.__enter__.return_value = mock_response
+
+        concepts = socratic_tutor.extract_concepts("api_key", "Dense study material about TCP Handshake.")
+        self.assertEqual(len(concepts), 3)
+        self.assertEqual(concepts[0]["concept"], "SYN Connection")
+        self.assertEqual(concepts[0]["status"], "Unvisited")
+        self.assertEqual(concepts[0]["score"], 0.0)
+
+        # 2. Failure fallback case
+        mock_urlopen.side_effect = Exception("HTTP 500 Server Error")
+        fallback_concepts = socratic_tutor.extract_concepts("api_key", "Dense study material.")
+        self.assertEqual(len(fallback_concepts), 3)
+        self.assertEqual(fallback_concepts[0]["concept"], "Core Definitions and Fundamentals")
+
+    def test_draw_progress_dashboard(self):
+        concepts = [
+            {"id": 1, "concept": "SYN Connection", "status": "Mastered", "score": 1.0},
+            {"id": 2, "concept": "SYN-ACK Verification", "status": "Testing", "score": 0.5},
+            {"id": 3, "concept": "ACK Establishment", "status": "Unvisited", "score": 0.0}
+        ]
+        # Just ensure drawing function executes without throwing any exceptions
+        try:
+            socratic_tutor.draw_progress_dashboard(concepts)
+            success = True
+        except Exception as e:
+            success = False
+        self.assertTrue(success)
+
+    @patch('urllib.request.urlopen')
+    def test_query_gemini_json_parsing(self, mock_urlopen):
+        # Set up mock response containing structured JSON string in the text part
+        mock_response = MagicMock()
+        json_payload = {
+            "tutor_speech": "Exactly! Now how does the server respond?",
+            "assessed_concept_id": 1,
+            "comprehension_score_change": 0.5,
+            "concept_mastered": False,
+            "next_concept_id_to_test": 2
+        }
+        json_string = json.dumps(json_payload)
+        
+        # Structure matching Gemini API response
+        mock_response.read.return_value = json.dumps({
+            "candidates": [{
+                "content": {
+                    "parts": [{"text": json_string}]
+                }
+            }]
+        }).encode('utf-8')
+        mock_urlopen.return_value.__enter__.return_value = mock_response
+
+        # Execute query_gemini (it should not try to run TTS because model is set to gemini-3.5-flash-lite)
+        ai_text, audio_base64, evaluation = socratic_tutor.query_gemini(
+            "api_key",
+            "gemini-3.5-flash-lite",
+            "System instructions...",
+            "User prompt...",
+            []
+        )
+
+        # Verify parsing and three-value return
+        self.assertEqual(ai_text, "Exactly! Now how does the server respond?")
+        self.assertIsNone(audio_base64)
+        self.assertIsNotNone(evaluation)
+        self.assertEqual(evaluation["assessed_concept_id"], 1)
+        self.assertEqual(evaluation["comprehension_score_change"], 0.5)
+
+    def test_progress_load_and_save(self):
+        # 1. Test load when progress file doesn't exist
+        progress = socratic_tutor.load_tutor_progress()
+        self.assertEqual(progress, {})
+
+        # 2. Save progress and load it back
+        test_progress = {
+            "track::module": [
+                {"id": 1, "concept": "Test Concept", "status": "Mastered", "score": 1.0}
+            ]
+        }
+        success = socratic_tutor.save_tutor_progress(test_progress)
+        self.assertTrue(success)
+
+        loaded = socratic_tutor.load_tutor_progress()
+        self.assertEqual(len(loaded["track::module"]), 1)
+        self.assertEqual(loaded["track::module"][0]["concept"], "Test Concept")
+        self.assertEqual(loaded["track::module"][0]["status"], "Mastered")
+        self.assertEqual(loaded["track::module"][0]["score"], 1.0)
 
 if __name__ == '__main__':
     unittest.main()

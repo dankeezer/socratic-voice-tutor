@@ -2,7 +2,9 @@
 .tutor_key
 .gemini_key
 .tutor_config
+.tutor_progress
 .cm_project
+.exploit/*
 
 # Audio files
 *.wav
