@@ -44,6 +44,35 @@ class AnimatedLoader:
 KEY_FILE = ".tutor_key"
 COURSE_DATA_FILE = "course_data.js"
 WAV_OUTPUT_FILE = "tutor_response.wav"
+TUTOR_CONFIG_FILE = ".tutor_config"
+
+def load_tutor_config():
+    config = {
+        "voice_speed": 1.1,
+        "voice_name": "Aoede"
+    }
+    if os.path.exists(TUTOR_CONFIG_FILE):
+        try:
+            with open(TUTOR_CONFIG_FILE, "r") as f:
+                data = json.load(f)
+                for k, v in data.items():
+                    config[k] = v
+        except Exception:
+            pass
+    return config
+
+def save_tutor_config(config):
+    try:
+        existing = {}
+        if os.path.exists(TUTOR_CONFIG_FILE):
+            with open(TUTOR_CONFIG_FILE, "r") as f:
+                existing = json.load(f)
+        for k, v in config.items():
+            existing[k] = v
+        with open(TUTOR_CONFIG_FILE, "w") as f:
+            json.dump(existing, f, indent=2)
+    except Exception:
+        pass
 
 def get_obfuscated_key():
     if os.path.exists(KEY_FILE):
@@ -98,7 +127,7 @@ def load_curriculum():
         print(f"Error parsing curriculum database: {e}")
         sys.exit(1)
 
-def play_pcm_audio(audio_base64, sample_rate=24000):
+def play_pcm_audio(audio_base64, sample_rate=24000, play_rate=1.1):
     try:
         pcm_bytes = base64.b64decode(audio_base64)
         
@@ -110,8 +139,8 @@ def play_pcm_audio(audio_base64, sample_rate=24000):
             wav_file.writeframes(pcm_bytes)
             
         # Play natively on macOS via afplay (built-in command-line audio player)
-        # Play at 1.1x speed (10% faster) with high-quality pitch preservation (-q 1)
-        subprocess.run(["afplay", "-r", "1.1", "-q", "1", WAV_OUTPUT_FILE])
+        # Play at the configured playback rate with high-quality pitch preservation (-q 1)
+        subprocess.run(["afplay", "-r", str(play_rate), "-q", "1", WAV_OUTPUT_FILE])
         
         # Clean up temporary audio file
         if os.path.exists(WAV_OUTPUT_FILE):
@@ -537,8 +566,15 @@ def main():
     else:
         print("\033[92m✔ API Key loaded successfully from secure local vault.\033[0m")
         
-    # 2. Select Model and Voice
-    voice_name = "Aoede" # Warm female default
+    # 2. Select Model and Voice (and Playback Configuration)
+    tutor_config = load_tutor_config()
+    voice_speed = tutor_config.get("voice_speed", 1.1)
+    voice_name = tutor_config.get("voice_name", "Aoede")
+    
+    # Save back to ensure keys exist in .tutor_config for easy user editing
+    tutor_config["voice_speed"] = voice_speed
+    tutor_config["voice_name"] = voice_name
+    save_tutor_config(tutor_config)
     
     print("\nDetecting models supported by your API Key...")
     available_models = get_available_models(api_key)
@@ -681,7 +717,7 @@ Reference Material for this Entire Module:
                 
             # Play Neural Audio via afplay
             if use_neural_audio and audio_base64:
-                played = play_pcm_audio(audio_base64)
+                played = play_pcm_audio(audio_base64, play_rate=voice_speed)
                 if not played:
                     # Fallback to high-quality macOS system default voice
                     print("\033[30;43m[Voice Output: macOS Premium System Fallback]\033[0m")
