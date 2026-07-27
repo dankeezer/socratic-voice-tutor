@@ -110,7 +110,8 @@ def play_pcm_audio(audio_base64, sample_rate=24000):
             wav_file.writeframes(pcm_bytes)
             
         # Play natively on macOS via afplay (built-in command-line audio player)
-        subprocess.run(["afplay", WAV_OUTPUT_FILE])
+        # Play at 1.1x speed (10% faster) with high-quality pitch preservation (-q 1)
+        subprocess.run(["afplay", "-r", "1.1", "-q", "1", WAV_OUTPUT_FILE])
         
         # Clean up temporary audio file
         if os.path.exists(WAV_OUTPUT_FILE):
