@@ -7,12 +7,6 @@ import sys
 # loading the standard macOS root cert bundle if it exists.
 if sys.platform == "darwin" and os.path.exists("/etc/ssl/cert.pem") and not os.environ.get("SSL_CERT_FILE"):
     os.environ["SSL_CERT_FILE"] = "/etc/ssl/cert.pem"
-
-# On macOS, Python installers often do not load standard system root certificates,
-# leading to SSL: CERTIFICATE_VERIFY_FAILED error. We securely resolve this by
-# loading the standard macOS root cert bundle if it exists.
-if sys.platform == "darwin" and os.path.exists("/etc/ssl/cert.pem") and not os.environ.get("SSL_CERT_FILE"):
-    os.environ["SSL_CERT_FILE"] = "/etc/ssl/cert.pem"
 import json
 import base64
 import wave
